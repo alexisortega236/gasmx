@@ -4,8 +4,39 @@ use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\FuelFillupController;
 use App\Http\Controllers\Api\V1\StationController;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+
 
 Route::prefix('v1')->group(function () {
+
+    Route::get('/health', function () {
+    $databaseOk = false;
+    $cacheOk = false;
+
+    try {
+        DB::select('SELECT 1');
+        $databaseOk = true;
+    } catch (Throwable) {
+    }
+
+    try {
+        Cache::put('gas-mx:health-check', 'ok', now()->addMinute());
+        $cacheOk = Cache::get('gas-mx:health-check') === 'ok';
+    } catch (Throwable) {
+    }
+
+    $healthy = $databaseOk && $cacheOk;
+
+    return response()->json([
+        'status' => $healthy ? 'ok' : 'degraded',
+        'services' => [
+            'database' => $databaseOk ? 'ok' : 'unavailable',
+            'cache' => $cacheOk ? 'ok' : 'unavailable',
+        ],
+        'timestamp' => now()->toISOString(),
+    ], $healthy ? 200 : 503);
+});
     /*
      * Estaciones públicas.
      */
