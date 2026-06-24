@@ -1,0 +1,16 @@
+#!/usr/bin/env sh
+set -eu
+
+: "${PORT:=10000}"
+
+sed -ri "s/Listen 80/Listen ${PORT}/" /etc/apache2/ports.conf
+sed -ri "s/<VirtualHost \*:80>/<VirtualHost *:${PORT}>/" \
+    /etc/apache2/sites-available/000-default.conf
+
+echo "Running migrations..."
+php artisan migrate --force
+
+echo "Caching Laravel configuration..."
+php artisan config:cache
+
+exec apache2-foreground
