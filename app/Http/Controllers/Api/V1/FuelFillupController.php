@@ -11,47 +11,73 @@ use Illuminate\Http\Request;
 
 class FuelFillupController extends Controller
 {
-    public function store(Request $request): JsonResponse
-    {
-        $validated = $request->validate([
-            'station_id' => ['required', 'integer', 'exists:stations,id'],
-            'fuel_type' => ['required', 'in:regular,premium,diesel'],
-            'filled_at' => ['required', 'date', 'before_or_equal:now'],
-        ]);
+   public function store(Request $request): JsonResponse
+{
+    $validated = $request->validate([
+        'station_id' => ['required', 'integer', 'exists:stations,id'],
+        'fuel_type' => ['required', 'in:regular,premium,diesel'],
+        'filled_at' => ['required', 'date', 'before_or_equal:now'],
+    ]);
 
-        $filledAt = Carbon::parse($validated['filled_at']);
-        $reminderEligibleAt = $filledAt->copy()->addDays(5);
+    $filledAt = Carbon::parse($validated['filled_at']);
 
-        $fillup = FuelFillup::create([
-            'user_id' => $request->user()->id,
-            'station_id' => $validated['station_id'],
-            'fuel_type' => $validated['fuel_type'],
-            'filled_at' => $filledAt,
-            'reminder_eligible_at' => $reminderEligibleAt,
-        ]);
-
-        $station = Station::findOrFail($fillup->station_id);
-
+    if ($filledAt->lt(now()->subDays(90))) {
         return response()->json([
-            'data' => [
-                'id' => $fillup->id,
-                'station' => [
-                    'id' => $station->id,
-                    'name' => $station->name,
-                    'permit_number' => $station->permit_number,
-                ],
-                'fuel_type' => $fillup->fuel_type,
-                'filled_at' => $fillup->filled_at->toISOString(),
-                'reminder_eligible_at' => $fillup->reminder_eligible_at->toISOString(),
-                'performance_score' => $fillup->performance_score,
-            ],
-            'meta' => [
-                'performance_question_available' => now()->greaterThanOrEqualTo(
-                    $fillup->reminder_eligible_at
-                ),
-            ],
-        ], 201);
+            'message' => 'Solo puedes registrar cargas realizadas durante los últimos 90 días.',
+        ], 422);
     }
+
+    $duplicateExists = FuelFillup::query()
+        ->where('user_id', $request->user()->id)
+        ->where('station_id', $validated['station_id'])
+        ->where('fuel_type', $validated['fuel_type'])
+        ->whereBetween('filled_at', [
+            $filledAt->copy()->subHours(6),
+            $filledAt->copy()->addHours(6),
+        ])
+        ->exists();
+
+    if ($duplicateExists) {
+        return response()->json([
+            'message' => 'Ya existe una carga muy similar registrada para esta estación y combustible.',
+            'meta' => [
+                'duplicate_window_hours' => 6,
+            ],
+        ], 422);
+    }
+
+    $reminderEligibleAt = $filledAt->copy()->addDays(5);
+
+    $fillup = FuelFillup::create([
+        'user_id' => $request->user()->id,
+        'station_id' => $validated['station_id'],
+        'fuel_type' => $validated['fuel_type'],
+        'filled_at' => $filledAt,
+        'reminder_eligible_at' => $reminderEligibleAt,
+    ]);
+
+    $station = Station::findOrFail($fillup->station_id);
+
+    return response()->json([
+        'data' => [
+            'id' => $fillup->id,
+            'station' => [
+                'id' => $station->id,
+                'name' => $station->name,
+                'permit_number' => $station->permit_number,
+            ],
+            'fuel_type' => $fillup->fuel_type,
+            'filled_at' => $fillup->filled_at->toISOString(),
+            'reminder_eligible_at' => $fillup->reminder_eligible_at->toISOString(),
+            'performance_score' => $fillup->performance_score,
+        ],
+        'meta' => [
+            'performance_question_available' => now()->greaterThanOrEqualTo(
+                $fillup->reminder_eligible_at
+            ),
+        ],
+    ], 201);
+}
 
     public function pendingPerformance(Request $request): JsonResponse
     {
@@ -113,7 +139,20 @@ class FuelFillupController extends Controller
                 ],
             ], 422);
         }
+        $todayReportsCount = FuelFillup::query()
+            ->where('user_id', $request->user()->id)
+            ->whereNotNull('performance_score')
+            ->whereDate('performance_reported_at', now()->toDateString())
+            ->count();
 
+        if ($todayReportsCount >= 10) {
+            return response()->json([
+                'message' => 'Alcanzaste el límite diario de 10 evaluaciones de rendimiento.',
+                'meta' => [
+                    'daily_limit' => 10,
+                ],
+            ], 429);
+        }
         $validated = $request->validate([
             'performance_score' => ['required', 'integer', 'min:0', 'max:100'],
         ]);
@@ -132,6 +171,39 @@ class FuelFillupController extends Controller
                 'performance_reported_at' => $fillup->performance_reported_at->toISOString(),
             ],
             'message' => 'Gracias. Tu experiencia ayudará a otros conductores.',
+        ]);
+    }
+
+    public function dismissPerformance(
+        Request $request,
+        FuelFillup $fillup
+    ): JsonResponse {
+        if ($fillup->user_id !== $request->user()->id) {
+            abort(403, 'No puedes descartar una carga de otro usuario.');
+        }
+
+        if ($fillup->performance_score !== null) {
+            return response()->json([
+                'message' => 'Esta carga ya fue evaluada.',
+            ], 422);
+        }
+
+        if ($fillup->dismissed_at !== null) {
+            return response()->json([
+                'message' => 'Esta carga ya había sido descartada.',
+            ], 422);
+        }
+
+        $fillup->update([
+            'dismissed_at' => now(),
+        ]);
+
+        return response()->json([
+            'data' => [
+                'id' => $fillup->id,
+                'dismissed_at' => $fillup->dismissed_at->toISOString(),
+            ],
+            'message' => 'Evaluación descartada. No volveremos a preguntarte por esta carga.',
         ]);
     }
 }
